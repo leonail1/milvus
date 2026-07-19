@@ -8,6 +8,9 @@ import (
 #cgo pkg-config: milvus_core
 #cgo LDFLAGS: -ldl
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <dlfcn.h>
 #include <stdint.h>
 #include "segcore/segcore_init_c.h"
