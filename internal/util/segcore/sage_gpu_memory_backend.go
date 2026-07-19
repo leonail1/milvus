@@ -53,13 +53,19 @@ func (sageSegcoreGpuMemoryBackend) resetHighWater(deviceID int32) int32 {
 	return status
 }
 
-func (sageSegcoreGpuMemoryBackend) trim(deviceID int32, minBytesToKeep uint64, synchronize bool) int32 {
+func (backend sageSegcoreGpuMemoryBackend) trim(deviceID int32, minBytesToKeep uint64, synchronize bool) int32 {
 	status := trimSageCuvsGpuMemoryPool(deviceID, minBytesToKeep, synchronize)
 	operation := "trim_async"
 	if synchronize {
 		operation = "trim_sync"
 	}
 	recordSageGpuPoolOperation(deviceID, operation, status)
+	if status == 0 {
+		// The pre-trim stats used for the reclaim decision leave the exported
+		// gauges stale.  Re-sample after trimming so observability reflects the
+		// pool state that queries and the NVML process accounting actually see.
+		_, _ = backend.stats(deviceID)
+	}
 	return status
 }
 
