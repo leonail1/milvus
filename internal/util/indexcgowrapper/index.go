@@ -207,6 +207,9 @@ func CreateJSONKeyStats(ctx context.Context, buildIndexInfo *indexcgopb.BuildInd
 // TODO: this seems to be used only for test. We should mark the method
 // name with ForTest, or maybe move to test file.
 func (index *CgoIndex) Build(dataset *Dataset) error {
+	endMaintenancePhase := segcore.BeginSageGpuMaintenancePhase()
+	defer endMaintenancePhase()
+
 	switch dataset.DType {
 	case schemapb.DataType_None:
 		return merr.WrapErrParameterInvalidMsg("build index on supported data type: %s", dataset.DType.String())

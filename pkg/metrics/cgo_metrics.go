@@ -73,6 +73,33 @@ var (
 			nodeIDLabelName,
 		},
 	)
+
+	SageCuvsGpuPoolBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: milvusNamespace,
+			Subsystem: subsystemCGO,
+			Name:      "sage_cuvs_gpu_pool_bytes",
+			Help:      "Current and high-water transient cuVS CUDA pool bytes.",
+		}, []string{
+			nodeIDLabelName,
+			"device_id",
+			"stat",
+		},
+	)
+
+	SageCuvsGpuPoolOperations = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: milvusNamespace,
+			Subsystem: subsystemCGO,
+			Name:      "sage_cuvs_gpu_pool_operations_total",
+			Help:      "CUDA pool telemetry and phase-control operations by return status.",
+		}, []string{
+			nodeIDLabelName,
+			"device_id",
+			"operation",
+			"status",
+		},
+	)
 )
 
 // RegisterCGOMetrics registers the cgo metrics.
@@ -82,5 +109,7 @@ func RegisterCGOMetrics(registry *prometheus.Registry) {
 		registry.MustRegister(RunningCgoCallTotal)
 		registry.MustRegister(CGODuration)
 		registry.MustRegister(CGOQueueDuration)
+		registry.MustRegister(SageCuvsGpuPoolBytes)
+		registry.MustRegister(SageCuvsGpuPoolOperations)
 	})
 }

@@ -137,6 +137,10 @@ func (t *SearchTask) PreExecute() error {
 }
 
 func (t *SearchTask) Execute() error {
+	if t.IsGpuIndex() {
+		endServingPhase := segcore.BeginSageGpuServingPhase()
+		defer endServingPhase()
+	}
 	log := log.Ctx(t.ctx).With(
 		zap.Int64("collectionID", t.collection.ID()),
 		zap.String("shard", t.req.GetDmlChannels()[0]),
@@ -478,6 +482,10 @@ func (t *StreamingSearchTask) MergeWith(other scheduler.Task) bool {
 }
 
 func (t *StreamingSearchTask) Execute() error {
+	if t.collection.IsGpuIndex() {
+		endServingPhase := segcore.BeginSageGpuServingPhase()
+		defer endServingPhase()
+	}
 	log := log.Ctx(t.ctx).With(
 		zap.Int64("collectionID", t.collection.ID()),
 		zap.String("shard", t.req.GetDmlChannels()[0]),

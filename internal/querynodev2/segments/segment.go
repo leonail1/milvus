@@ -1496,6 +1496,7 @@ func (s *LocalSegment) Release(ctx context.Context, opts ...releaseOption) {
 	ptr := s.ptr
 	if options.Scope == ReleaseScopeData {
 		s.ReleaseSegmentData()
+		segcore.NotifySageGpuMemoryReclaimable()
 		log.Info("release segment data done and the field indexes info has been set lazy load=true")
 		return
 	}
@@ -1509,6 +1510,7 @@ func (s *LocalSegment) Release(ctx context.Context, opts ...releaseOption) {
 		C.DeleteSegment(ptr)
 		return nil, nil
 	}).Await()
+	segcore.NotifySageGpuMemoryReclaimable()
 
 	// TODO: disable logical resource handling for now
 	// usage := s.ResourceUsageEstimate()

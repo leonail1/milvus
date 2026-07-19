@@ -46,6 +46,7 @@ import (
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/storagecommon"
 	"github.com/milvus-io/milvus/internal/util/indexparamcheck"
+	"github.com/milvus-io/milvus/internal/util/segcore"
 	"github.com/milvus-io/milvus/internal/util/vecindexmgr"
 	"github.com/milvus-io/milvus/pkg/v2/common"
 	"github.com/milvus-io/milvus/pkg/v2/log"
@@ -2221,6 +2222,9 @@ func (loader *segmentLoader) LoadIndex(ctx context.Context,
 	loadInfo *querypb.SegmentLoadInfo,
 	version int64,
 ) error {
+	endMaintenancePhase := segcore.BeginSageGpuMaintenancePhase()
+	defer endMaintenancePhase()
+
 	segment, ok := seg.(*LocalSegment)
 	if !ok {
 		return merr.WrapErrParameterInvalid("LocalSegment", fmt.Sprintf("%T", seg))
