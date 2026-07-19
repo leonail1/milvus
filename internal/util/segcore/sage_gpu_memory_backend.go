@@ -55,7 +55,11 @@ func (sageSegcoreGpuMemoryBackend) resetHighWater(deviceID int32) int32 {
 
 func (sageSegcoreGpuMemoryBackend) trim(deviceID int32, minBytesToKeep uint64, synchronize bool) int32 {
 	status := trimSageCuvsGpuMemoryPool(deviceID, minBytesToKeep, synchronize)
-	recordSageGpuPoolOperation(deviceID, "trim", status)
+	operation := "trim_async"
+	if synchronize {
+		operation = "trim_sync"
+	}
+	recordSageGpuPoolOperation(deviceID, operation, status)
 	return status
 }
 
@@ -88,8 +92,9 @@ func BeginSageGpuMaintenancePhase() func() {
 	return defaultSageGpuMemoryController.beginMaintenance()
 }
 
-// NotifySageGpuMemoryReclaimable forces a budget check after a database object
-// is released.  It never synchronizes a device or trims while work is active.
+// NotifySageGpuMemoryReclaimable records a reclaim debt after a database object
+// is released.  It never trims while work is active; the last tracked owner
+// repays the debt with a synchronized trim at the quiescence boundary.
 func NotifySageGpuMemoryReclaimable() {
 	defaultSageGpuMemoryController.maybeReclaim(true)
 }

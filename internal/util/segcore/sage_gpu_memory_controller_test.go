@@ -29,6 +29,10 @@ type fakeSageGpuMemoryBackend struct {
 	statsValue  SageCuvsGpuMemoryPoolStats
 	thresholds  []uint64
 	trimTargets []uint64
+	trimSync    []bool
+	trimStarted chan struct{}
+	trimResume  chan struct{}
+	trimStatus  int32
 	resetCount  int
 }
 
@@ -55,11 +59,19 @@ func (backend *fakeSageGpuMemoryBackend) resetHighWater(_ int32) int32 {
 	return 0
 }
 
-func (backend *fakeSageGpuMemoryBackend) trim(_ int32, minBytesToKeep uint64, _ bool) int32 {
+func (backend *fakeSageGpuMemoryBackend) trim(_ int32, minBytesToKeep uint64, synchronize bool) int32 {
 	backend.mu.Lock()
-	defer backend.mu.Unlock()
 	backend.trimTargets = append(backend.trimTargets, minBytesToKeep)
-	return 0
+	backend.trimSync = append(backend.trimSync, synchronize)
+	started := backend.trimStarted
+	resume := backend.trimResume
+	status := backend.trimStatus
+	backend.mu.Unlock()
+	if synchronize && started != nil {
+		close(started)
+		<-resume
+	}
+	return status
 }
 
 func testSageGpuMemoryController(backend *fakeSageGpuMemoryBackend, now func() time.Time) *sageGpuMemoryController {
@@ -87,6 +99,78 @@ func TestSageGpuMemoryControllerWaitsForLastQuery(t *testing.T) {
 	require.Empty(t, backend.trimTargets)
 	endSecond()
 	require.Equal(t, []uint64{64 * bytesPerMiB}, backend.trimTargets)
+	require.Equal(t, []bool{false}, backend.trimSync)
+}
+
+func TestSageGpuMemoryControllerCarriesForcedReclaimToQuiescence(t *testing.T) {
+	now := time.Unix(10, 0)
+	backend := &fakeSageGpuMemoryBackend{statsValue: SageCuvsGpuMemoryPoolStats{
+		ReservedCurrent: 512 * bytesPerMiB,
+	}}
+	controller := testSageGpuMemoryController(backend, func() time.Time { return now })
+
+	endQuery := controller.beginServing()
+	controller.maybeReclaim(true)
+	require.Empty(t, backend.trimTargets)
+	endQuery()
+	require.Equal(t, []uint64{64 * bytesPerMiB}, backend.trimTargets)
+	require.Equal(t, []bool{true}, backend.trimSync)
+}
+
+func TestSageGpuMemoryControllerRetriesFailedForcedReclaim(t *testing.T) {
+	now := time.Unix(10, 0)
+	backend := &fakeSageGpuMemoryBackend{
+		statsValue: SageCuvsGpuMemoryPoolStats{
+			ReservedCurrent: 512 * bytesPerMiB,
+		},
+		trimStatus: 7,
+	}
+	controller := testSageGpuMemoryController(backend, func() time.Time { return now })
+
+	controller.maybeReclaim(true)
+	require.True(t, controller.reclaimDebt.Load())
+	backend.mu.Lock()
+	backend.trimStatus = 0
+	backend.mu.Unlock()
+	controller.maybeReclaim(false)
+
+	require.False(t, controller.reclaimDebt.Load())
+	require.Equal(t, []uint64{64 * bytesPerMiB, 64 * bytesPerMiB}, backend.trimTargets)
+	require.Equal(t, []bool{true, true}, backend.trimSync)
+}
+
+func TestSageGpuMemoryControllerBlocksAdmissionDuringSynchronizedTrim(t *testing.T) {
+	now := time.Unix(10, 0)
+	backend := &fakeSageGpuMemoryBackend{
+		statsValue: SageCuvsGpuMemoryPoolStats{
+			ReservedCurrent: 512 * bytesPerMiB,
+		},
+		trimStarted: make(chan struct{}),
+		trimResume:  make(chan struct{}),
+	}
+	controller := testSageGpuMemoryController(backend, func() time.Time { return now })
+	reclaimed := make(chan struct{})
+	go func() {
+		controller.maybeReclaim(true)
+		close(reclaimed)
+	}()
+	<-backend.trimStarted
+
+	admitted := make(chan func(), 1)
+	go func() { admitted <- controller.beginServing() }()
+	select {
+	case <-admitted:
+		t.Fatal("query admitted during synchronized reclaim")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(backend.trimResume)
+	<-reclaimed
+	select {
+	case endQuery := <-admitted:
+		endQuery()
+	case <-time.After(time.Second):
+		t.Fatal("query remained blocked after synchronized reclaim")
+	}
 }
 
 func TestSageGpuMemoryControllerUsesHysteresisAndCooldown(t *testing.T) {
@@ -104,6 +188,7 @@ func TestSageGpuMemoryControllerUsesHysteresisAndCooldown(t *testing.T) {
 	now = now.Add(time.Second)
 	controller.maybeReclaim(false)
 	require.Equal(t, []uint64{64 * bytesPerMiB}, backend.trimTargets)
+	require.Equal(t, []bool{false}, backend.trimSync)
 }
 
 func TestSageGpuMemoryControllerReferenceCountsMaintenance(t *testing.T) {
@@ -122,4 +207,5 @@ func TestSageGpuMemoryControllerReferenceCountsMaintenance(t *testing.T) {
 	endSecond()
 	require.Equal(t, []uint64{2048 * bytesPerMiB, 64 * bytesPerMiB}, backend.thresholds)
 	require.Equal(t, []uint64{64 * bytesPerMiB}, backend.trimTargets)
+	require.Equal(t, []bool{true}, backend.trimSync)
 }

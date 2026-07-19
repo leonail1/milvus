@@ -58,7 +58,9 @@ type sageGpuMemoryController struct {
 	now         func() time.Time
 	active      atomic.Int64
 	maintenance atomic.Int64
+	reclaimDebt atomic.Bool
 	lastCheck   atomic.Int64
+	quiescence  sync.RWMutex
 	mu          sync.Mutex
 }
 
@@ -121,9 +123,12 @@ func (controller *sageGpuMemoryController) beginServing() func() {
 	if !controller.config.enabled {
 		return func() {}
 	}
+	controller.quiescence.RLock()
 	controller.active.Add(1)
 	return func() {
-		if controller.active.Add(-1) == 0 && controller.maintenance.Load() == 0 {
+		remaining := controller.active.Add(-1)
+		controller.quiescence.RUnlock()
+		if remaining == 0 && controller.maintenance.Load() == 0 {
 			controller.maybeReclaim(false)
 		}
 	}
@@ -133,6 +138,7 @@ func (controller *sageGpuMemoryController) beginMaintenance() func() {
 	if !controller.config.enabled {
 		return func() {}
 	}
+	controller.quiescence.RLock()
 	if controller.maintenance.Add(1) == 1 {
 		controller.mu.Lock()
 		controller.forEachDevice(func(deviceID int32, _ SageCuvsGpuMemoryPoolStats) {
@@ -143,6 +149,7 @@ func (controller *sageGpuMemoryController) beginMaintenance() func() {
 	}
 	return func() {
 		if controller.maintenance.Add(-1) != 0 {
+			controller.quiescence.RUnlock()
 			return
 		}
 		controller.mu.Lock()
@@ -150,13 +157,32 @@ func (controller *sageGpuMemoryController) beginMaintenance() func() {
 			controller.backend.setReleaseThreshold(deviceID, controller.config.servingReleaseThreshold)
 		})
 		controller.mu.Unlock()
+		controller.quiescence.RUnlock()
 		controller.maybeReclaim(true)
 	}
 }
 
 func (controller *sageGpuMemoryController) maybeReclaim(force bool) {
-	if !controller.config.enabled || controller.active.Load() != 0 || controller.maintenance.Load() != 0 {
+	if !controller.config.enabled {
 		return
+	}
+	// A release notification is a reclaim debt, not a best-effort hint.  It can
+	// arrive while a query or maintenance task still owns stream-ordered CUDA
+	// work; remember it so the last owner performs a synchronized trim at the
+	// database quiescence boundary instead of losing the only retry event.
+	if force {
+		controller.reclaimDebt.Store(true)
+	}
+	if controller.active.Load() != 0 || controller.maintenance.Load() != 0 {
+		return
+	}
+	force = controller.reclaimDebt.Swap(false)
+	if force {
+		// A writer lock converts the atomic zero-count observation into a real
+		// database quiescence boundary: existing owners drain and new GPU query
+		// or maintenance admissions wait until the synchronized trim completes.
+		controller.quiescence.Lock()
+		defer controller.quiescence.Unlock()
 	}
 	now := controller.now()
 	if !force && now.Sub(time.Unix(0, controller.lastCheck.Load())) < controller.config.trimCooldown {
@@ -166,6 +192,9 @@ func (controller *sageGpuMemoryController) maybeReclaim(force bool) {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	if controller.active.Load() != 0 || controller.maintenance.Load() != 0 {
+		if force {
+			controller.reclaimDebt.Store(true)
+		}
 		return
 	}
 	now = controller.now()
@@ -182,7 +211,13 @@ func (controller *sageGpuMemoryController) maybeReclaim(force bool) {
 		if stats.UsedCurrent > minBytesToKeep {
 			minBytesToKeep = stats.UsedCurrent
 		}
-		controller.backend.trim(deviceID, minBytesToKeep, false)
+		// Forced reclamation only reaches this point after both reference counts
+		// reach zero.  Synchronizing here makes deferred cudaFreeAsync work
+		// reclaimable before cudaMemPoolTrimTo; ordinary query-exit checks remain
+		// asynchronous and never introduce a device-wide barrier on the hot path.
+		if controller.backend.trim(deviceID, minBytesToKeep, force) != 0 && force {
+			controller.reclaimDebt.Store(true)
+		}
 	})
 }
 
